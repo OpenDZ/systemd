@@ -96,6 +96,23 @@ static const TargetMount protect_kernel_tunables_table[] = {
         { "/sys/fs/cgroup",             READWRITE,      false, }, /* READONLY is set by ProtectControlGroups= option */
 };
 
+/*
+ * ProtectHome=read-only table, protect $HOME and $XDG_RUNTIME_DIR and rest of
+ * system should be protected by ProtectSystem=
+ */
+static const TargetMount protect_home_read_only_table[] = {
+        { "/home",                      READONLY,       true,   },
+        { "/run/user",                  READONLY,       true,   },
+        { "/root",                      READONLY,       true,   },
+};
+
+/* ProtectHome=true table */
+static const TargetMount protect_home_yes_table[] = {
+        { "/home",                      INACCESSIBLE,   true,   },
+        { "/run/user",                  INACCESSIBLE,   true,   },
+        { "/root",                      INACCESSIBLE,   true,   },
+};
+
 /* ProtectSystem=true table */
 static const TargetMount protect_system_yes_table[] = {
         { "/usr",                       READONLY,       false,  },
@@ -188,6 +205,30 @@ static int append_protect_kernel_tunables(BindMount **p, const char *root_direct
                                     ELEMENTSOF(protect_kernel_tunables_table));
 }
 
+static int append_protect_home(BindMount **p, const char *root_directory, ProtectHome protect_home) {
+        int r = 0;
+
+        assert(p);
+
+        switch (protect_home) {
+        case PROTECT_HOME_READ_ONLY:
+                r = append_target_mounts(p, root_directory, protect_home_read_only_table,
+                                         ELEMENTSOF(protect_home_read_only_table));
+                break;
+        case PROTECT_HOME_YES:
+                r = append_target_mounts(p, root_directory, protect_home_yes_table,
+                                         ELEMENTSOF(protect_home_yes_table));
+        case PROTECT_HOME_NO:
+                r = 0;
+                break;
+        default:
+                r = -EINVAL;
+                break;
+        }
+
+        return r;
+}
+
 static int append_protect_system(BindMount **p, const char *root_directory, ProtectSystem protect_system) {
         int r = 0;
 
@@ -207,6 +248,7 @@ static int append_protect_system(BindMount **p, const char *root_directory, Prot
                                          ELEMENTSOF(protect_system_full_table));
                 break;
         case PROTECT_SYSTEM_NO:
+                r = 0;
                 break;
         default:
                 r = -EINVAL;
@@ -628,6 +670,7 @@ static unsigned int namespace_calculate_mounts(
 {
         unsigned n;
         unsigned protect_system_cnt = 0;
+        unsigned protect_home_cnt = 0;
 
         switch (protect_system) {
         case PROTECT_SYSTEM_STRICT:
@@ -643,6 +686,9 @@ static unsigned int namespace_calculate_mounts(
                 break;
         }
 
+        if (protect_home != PROTECT_HOME_NO)
+                protect_home_cnt = ELEMENTSOF(protect_home_yes_table);
+
         n = !!tmp_dir + !!var_tmp_dir +
                 strv_length(read_write_paths) +
                 strv_length(read_only_paths) +
@@ -650,8 +696,7 @@ static unsigned int namespace_calculate_mounts(
                 private_dev +
                 (protect_sysctl ? ELEMENTSOF(protect_kernel_tunables_table) : 0) +
                 (protect_cgroups ? 1 : 0) +
-                (protect_home != PROTECT_HOME_NO || protect_system == PROTECT_SYSTEM_STRICT ? 3 : 0) +
-                protect_system_cnt;
+                protect_home_cnt + protect_system_cnt;
 
         return n;
 }
@@ -731,26 +776,9 @@ int setup_namespace(
                         m++;
                 }
 
-                if (protect_home != PROTECT_HOME_NO || protect_system == PROTECT_SYSTEM_STRICT) {
-                        const char *home_dir, *run_user_dir, *root_dir;
-
-                        /* If protection of $HOME and $XDG_RUNTIME_DIR is requested, then go for it. If we are in
-                         * strict system protection mode, then also add entries for these directories, but mark them
-                         * writable. This is because we want ProtectHome= and ProtectSystem= to be fully orthogonal. */
-
-                        home_dir = prefix_roota(root_directory, "/home");
-                        home_dir = strjoina("-", home_dir);
-                        run_user_dir = prefix_roota(root_directory, "/run/user");
-                        run_user_dir = strjoina("-", run_user_dir);
-                        root_dir = prefix_roota(root_directory, "/root");
-                        root_dir = strjoina("-", root_dir);
-
-                        r = append_mounts(&m, STRV_MAKE(home_dir, run_user_dir, root_dir),
-                                protect_home == PROTECT_HOME_READ_ONLY ? READONLY :
-                                protect_home == PROTECT_HOME_YES ? INACCESSIBLE : READWRITE);
-                        if (r < 0)
-                                return r;
-                }
+                r = append_protect_home(&m, root_directory, protect_home);
+                if (r < 0)
+                        return r;
 
                 r = append_protect_system(&m, root_directory, protect_system);
                 if (r < 0)
