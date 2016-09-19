@@ -515,6 +515,36 @@ static int chase_all_symlinks(const char *root_directory, BindMount *m, unsigned
         return 0;
 }
 
+static unsigned int namespace_calculate_mounts(
+                char** read_write_paths,
+                char** read_only_paths,
+                char** inaccessible_paths,
+                const char* tmp_dir,
+                const char* var_tmp_dir,
+                bool private_dev,
+                bool protect_sysctl,
+                bool protect_cgroups,
+                ProtectHome protect_home,
+                ProtectSystem protect_system)
+{
+        unsigned n;
+
+        n = !!tmp_dir + !!var_tmp_dir +
+                strv_length(read_write_paths) +
+                strv_length(read_only_paths) +
+                strv_length(inaccessible_paths) +
+                private_dev +
+                (protect_sysctl ? ELEMENTSOF(protect_kernel_tunables_table) : 0) +
+                (protect_cgroups ? 1 : 0) +
+                (protect_home != PROTECT_HOME_NO || protect_system == PROTECT_SYSTEM_STRICT ? 3 : 0) +
+                (protect_system == PROTECT_SYSTEM_STRICT ?
+                 (2 + !private_dev + !protect_sysctl) :
+                 ((protect_system != PROTECT_SYSTEM_NO ? 3 : 0) +
+                  (protect_system == PROTECT_SYSTEM_FULL ? 1 : 0)));
+
+        return n;
+}
+
 int setup_namespace(
                 const char* root_directory,
                 char** read_write_paths,
@@ -530,24 +560,24 @@ int setup_namespace(
                 unsigned long mount_flags) {
 
         BindMount *m, *mounts = NULL;
+        bool make_slave;
         unsigned n;
         int r = 0;
 
         if (mount_flags == 0)
                 mount_flags = MS_SHARED;
 
-        n = !!tmp_dir + !!var_tmp_dir +
-                strv_length(read_write_paths) +
-                strv_length(read_only_paths) +
-                strv_length(inaccessible_paths) +
-                private_dev +
-                (protect_sysctl ? ELEMENTSOF(protect_kernel_tunables_table) : 0) +
-                (protect_cgroups ? 1 : 0) +
-                (protect_home != PROTECT_HOME_NO || protect_system == PROTECT_SYSTEM_STRICT ? 3 : 0) +
-                (protect_system == PROTECT_SYSTEM_STRICT ?
-                 (2 + !private_dev + !protect_sysctl) :
-                 ((protect_system != PROTECT_SYSTEM_NO ? 3 : 0) +
-                  (protect_system == PROTECT_SYSTEM_FULL ? 1 : 0)));
+        n = namespace_calculate_mounts(read_write_paths,
+                                       read_only_paths,
+                                       inaccessible_paths,
+                                       tmp_dir, var_tmp_dir,
+                                       private_dev, protect_sysctl,
+                                       protect_cgroups, protect_home,
+                                       protect_system);
+
+        /* Set mount slave mode */
+        if (root_directory || n > 0)
+                make_slave = true;
 
         if (n > 0) {
                 m = mounts = (BindMount *) alloca0(n * sizeof(BindMount));
@@ -678,7 +708,7 @@ int setup_namespace(
                 goto finish;
         }
 
-        if (n > 0 || root_directory) {
+        if (make_slave) {
                 /* Remount / as SLAVE so that nothing now mounted in the namespace
                    shows up in the parent */
                 if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL) < 0) {
