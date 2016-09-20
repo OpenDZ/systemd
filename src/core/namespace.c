@@ -716,7 +716,7 @@ int setup_namespace(
                 unsigned long mount_flags) {
 
         BindMount *m, *mounts = NULL;
-        bool make_slave;
+        bool make_slave = false;
         unsigned n;
         int r = 0;
 
